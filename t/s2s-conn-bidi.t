@@ -12,10 +12,6 @@ use DJabberd::VHost;
 my $class = "DJabberd::Connection::ServerBiDi";
 use_ok($class);
 
-#my $domain = "ruff.mobi";
-#my $dother = "xmpp.org";
-#my $dother = "lightwitch.org";
-
 my $domain = "example.com";
 my $dother = "example.net";
 my $s=DJabberd->new();

@@ -6,6 +6,7 @@ use DJabberd::Connection::ServerOut;
 #use base qw(DJabberd::Connection::ServerIn DJabberd::Connection::ServerOut);
 #use mro 'c3';
 
+
 use fields (
 	'bidi',
      # These are for ServerIn
@@ -21,6 +22,48 @@ use constant {
 	BIDI_CLIENT  =>  1,
 	BIDI_SERVER  =>  2,
 };
+
+=head1 NAME
+
+DJabberd::Connection::ServerBiDi - Bidirectional Server-to-Server Connections [XEP-0288]
+
+=head1 VERSION
+
+Version 0.0.1
+=cut
+
+our $VERSION = '0.01';
+
+=head1 SYNOPSIS
+
+The extension implements Bidirectional S2S Connection [XEP-0288] to allow using
+single connection for egress and ingress streams.
+
+  S2SServerTransport DJabberd::Connection::BiDi
+  S2SClientTransport DJabberd::Connection::BiDi
+
+Implementation is using ServerIn and ServerOut classes for actual stream processing
+merely adding some sugar to follow sematics of XEP-0288. That means it will use
+same authentication mechanisms as normal unidirectional stream. Although since
+those classes are using dialback only, the implementation is also bound to dialback
+processing.
+
+If BiDi connection is enabled while there's existing ServerOut connection - it
+will abort existing connection with <conflict/> stream error and replace it.
+
+ServerIn connections are unbound so there's no way to replace them - this however
+should be handled by remote side.
+
+=head1 METHODS
+
+=head2 new(...)
+
+Based on type of arguments (%hash or (sock,server) pair) will call either
+ServerIn->new($sock,$server) or ServerOut->new(%hash) constructor to initialize
+ServerBiDi object either way. This is to allow transport to be used as drop-in
+replacement of the corresponding built-in classes.
+
+=cut
 
 sub new {
     my $class = shift;
@@ -51,11 +94,29 @@ sub new {
 # = Attach Out queue to ourself and call its on_connected to activate S2S delivery
 #
 
+=head2 start_stream_back
+
+This ServerIn overriden method will add <bidi/> stream feature to the back stream.
+=cut
+
 sub start_stream_back {
     my $self = shift;
     $self->{bidi} = BIDI_UNKNOWN;
     $self->SUPER::start_stream_back(@_, features => "<bidi xmlns='urn:xmpp:features:bidi'/>");
 }
+
+=head2 dialback_result_valid
+
+This ServerIn overriden method will put a period on bidi negotiation. If negotiation
+was successfull - it will enable egress stream by attaching itself to the S2S Queue.
+
+At this poing if there's existing queueu with existing connection - the connection
+will be replaced by the current one, while old connection will be aborted.
+
+If no bidi is negotiated - bidi will be permanenetly switched off on this connection
+and it will continue working as normal ServerIn connection.
+
+=cut
 sub dialback_result_valid {
     my $self = shift;
     $self->SUPER::dialback_result_valid(@_);
@@ -104,6 +165,16 @@ sub dialback_result_valid {
 # = We are done, inherited ServerIn part will handle incoming stanzas
 #
 
+=head2 on_stream_start
+
+This method overrides both ServerIn and ServerOut. If current connection is
+constructed as ServerIn - it will path through to it. Otherwise for ServerOut
+it will delay the stream_back and hence dialback till features processing.
+
+If however stream version is below 1.0 and hence features are optional - it
+will also pass through to ServerOut parent method.
+=cut
+
 sub on_stream_start {
     my $self = shift;
     my ($ss) = @_;
@@ -125,6 +196,15 @@ sub on_stream_start {
     }
 }
 
+=head2 set_rcvd_features
+
+This ServerOut overriden method checks the stream features and will enable bidi
+feature by sending corresponding <bidi/> nonza. Even though ingress stream will
+be enabled at this point, actual enablement will happen as part of dialback
+verification process, hence ServerIn implementation will abort the stream if any
+stanza comes in before dialback process is complete.
+=cut
+
 sub set_rcvd_features {
     my $self = shift;
     $self->SUPER::set_rcvd_features(@_);
@@ -136,6 +216,15 @@ sub set_rcvd_features {
     }
     DJabberd::Connection::ServerOut::on_stream_start($self,$self->{in_stream}) if(ref($self->{in_stream}));
 }
+
+=head2 on_stanza_received
+
+This method overrides both parent classes and will call either of them depending
+on how the object was constructed and whether bidi is enabled. It will also
+explicitly handle incoming <bidi/> nonza to enable the bidi for ServerIn.
+Since the same method is used for dialback processing of the ServerOut class -
+it will also hook into this process to register remote domain for ingress stream.
+=cut
 
 sub on_stanza_received {
     my $self = shift;
@@ -180,4 +269,17 @@ sub close {
 *on_connected = \&DJabberd::Connection::ServerOut::on_connected;
 *event_write = \&DJabberd::Connection::ServerOut::event_write;
 *event_hup = \&DJabberd::Connection::ServerOut::event_hup;
+
+=head1 AUTHOR
+
+Ruslan N. Marchenko, C<< <me at ruff.mobi> >>
+
+=head1 COPYRIGHT & LICENSE
+
+Copyright 2016 Ruslan N. Marchenko, all rights reserved.
+
+This program is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
+=cut
+
 1;
