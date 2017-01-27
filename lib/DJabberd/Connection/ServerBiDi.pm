@@ -39,8 +39,8 @@ our $VERSION = '0.01';
 The extension implements Bidirectional S2S Connection [XEP-0288] to allow using
 single connection for egress and ingress streams.
 
-  S2SServerTransport DJabberd::Connection::BiDi
-  S2SClientTransport DJabberd::Connection::BiDi
+  S2SServerTransport DJabberd::Connection::ServerBiDi
+  S2SClientTransport DJabberd::Connection::ServerBiDi
 
 Implementation is using ServerIn and ServerOut classes for actual stream processing
 merely adding some sugar to follow sematics of XEP-0288. That means it will use
@@ -234,7 +234,7 @@ sub on_stanza_received {
 	$self->{bidi} = BIDI_SERVER;
     } elsif(ref($self->{queue}) && ($self->{bidi} == BIDI_DISABLE or $node->element eq "{jabber:server:dialback}result")) {
 	# If queue is set we're either bidi or out (client). For bidi we need only db:result, otherwise we're pure out
-	if($node->element eq "{jabber:server:dialback}result" && $node->attr('{}type') eq 'valid') {
+	if($node->element eq "{jabber:server:dialback}result" && $node->attr('{}type') eq 'valid' && $self->{bidi} != BIDI_DISABLE) {
 	    my $dom = $node->attr('{}from');
 	    if($dom eq $self->{queue}->{domain}) {
     	        $self->{verified_remote_domain}->{lc $dom} = $dom;
