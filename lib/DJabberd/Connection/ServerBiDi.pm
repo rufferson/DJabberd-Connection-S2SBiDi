@@ -208,6 +208,16 @@ stanza comes in before dialback process is complete.
 sub set_rcvd_features {
     my $self = shift;
     $self->SUPER::set_rcvd_features(@_);
+    my ($tls) = grep{$_->element eq '{urn:ietf:params:xml:ns:xmpp-tls}starttls'}$_[0]->children_elements;
+    $self->log->debug("Got features ".join(', ',map{"".$_->element}$_[0]->children_elements));
+    # Whether it is <required/> or <not/> - we want to <starttls/>
+    if($tls && $self->vhost->server->ssl_cert_file && $self->vhost->server->ssl_private_key_file) {
+	$self->{in_stream} = 'starttls';
+	my $xml = "<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>";
+	$self->log_outgoing_data($xml);
+	$self->write(\$xml);
+	return; # We'll end up with new stream or closed connection anyway
+    }
     my ($bidi) = grep{$_->element eq '{urn:xmpp:features:bidi}bidi'}$_[0]->children_elements;
     if($bidi && $self->{queue}) {
 	$self->log->debug("Peer supports BIDI on conn ".$self->{id}.", enabling");
@@ -232,6 +242,10 @@ sub on_stanza_received {
     if($node->element eq "{urn:xmpp:bidi}bidi" && $self->{bidi} == BIDI_UNKNOWN) {
 	$self->log_incoming_data($node);
 	$self->{bidi} = BIDI_SERVER;
+    } elsif($node->element eq '{urn:ietf:params:xml:ns:xmpp-tls}proceed' && !$self->ssl && $self->{in_stream} eq 'starttls') {
+	    my $tls = DJabberd::Stanza::StartTLS->downbless($node, $self);
+	    $self->filter_incoming_server_builtin($tls);
+	    $self->on_connected;
     } elsif(ref($self->{queue}) && ($self->{bidi} == BIDI_DISABLE or $node->element eq "{jabber:server:dialback}result")) {
 	# If queue is set we're either bidi or out (client). For bidi we need only db:result, otherwise we're pure out
 	if($node->element eq "{jabber:server:dialback}result" && $node->attr('{}type') eq 'valid' && $self->{bidi} != BIDI_DISABLE) {
