@@ -5,7 +5,7 @@ use DJabberd::Connection::ServerOut;
 # below doesn't work due to fields pragma
 #use base qw(DJabberd::Connection::ServerIn DJabberd::Connection::ServerOut);
 #use mro 'c3';
-
+use DJabberd::SASL::Connection::External;
 
 use fields (
 	'bidi',
@@ -73,7 +73,7 @@ sub new {
 	return DJabberd::Connection::ServerOut::new($class,@_);
     }
 }
-# Use functionality of In and Out on same socket - according to XEP-0288
+# Use functionality of In and Out on same socket - according to XEP-0288.
 # All the dancing around {bidi} state is to prevent enablement of the bidi
 # by out-of-phase <bidi> nonza (thus breaking delivery)
 #
@@ -94,6 +94,17 @@ sub new {
 # = Attach Out queue to ourself and call its on_connected to activate S2S delivery
 #
 
+=head2 on_connected
+
+Override ServerOut::on_connected - we need to provide at least 'from' attribute
+=cut
+sub on_connected {
+    my $self = shift;
+    $self->start_init_stream(extra_attr => "xmlns:db='jabber:server:dialback' from='".$self->{vhost}->server_name."'",
+                             to         => $self->{queue}->{domain});
+    $self->watch_read(1);
+}
+
 =head2 start_stream_back
 
 This ServerIn overriden method will add <bidi/> stream feature to the back stream.
@@ -110,7 +121,7 @@ sub start_stream_back {
 This ServerIn overriden method will put a period on bidi negotiation. If negotiation
 was successfull - it will enable egress stream by attaching itself to the S2S Queue.
 
-At this poing if there's existing queueu with existing connection - the connection
+At this point if there's existing queue with existing connection - the connection
 will be replaced by the current one, while old connection will be aborted.
 
 If no bidi is negotiated - bidi will be permanenetly switched off on this connection
@@ -168,7 +179,7 @@ sub dialback_result_valid {
 =head2 on_stream_start
 
 This method overrides both ServerIn and ServerOut. If current connection is
-constructed as ServerIn - it will path through to it. Otherwise for ServerOut
+constructed as ServerIn - it will patch through to it. Otherwise for ServerOut
 it will delay the stream_back and hence dialback till features processing.
 
 If however stream version is below 1.0 and hence features are optional - it
@@ -199,8 +210,8 @@ sub on_stream_start {
 =head2 set_rcvd_features
 
 This ServerOut overriden method checks the stream features and will enable bidi
-feature by sending corresponding <bidi/> nonza. Even though ingress stream will
-be enabled at this point, actual enablement will happen as part of dialback
+feature by sending corresponding <bidi/> nonza. Even though ingress stream is
+enabled at this point, actual enablement happens as part of dialback
 verification process, hence ServerIn implementation will abort the stream if any
 stanza comes in before dialback process is complete.
 =cut
@@ -217,6 +228,23 @@ sub set_rcvd_features {
 	$self->log_outgoing_data($xml);
 	$self->write(\$xml);
 	return; # We'll end up with new stream or closed connection anyway
+    }
+    my ($sasl) = grep{$_->element eq '{urn:ietf:params:xml:ns:xmpp-sasl}mechanisms'}$_[0]->children_elements;
+    if($sasl && $sasl->first_element && $sasl->first_element->element_name eq 'mechanism' && $sasl->first_element->first_child eq 'EXTERNAL' && $self->{ssl}) {
+	# SASL External over TLS should be preferred to Dialback.
+	$sasl = DJabberd::SASL::Connection::External->new($self);
+	$self->log->debug("Peer supports SASL on conn ".$self->{id}.", ".$self->{sasl});
+	if($sasl && ($sasl->res() == &Net::SSLeay::X509_V_OK)) {
+	    my $xml = "<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='EXTERNAL'>=</auth>";
+	    $self->log_outgoing_data($xml);
+	    $self->write(\$xml);
+	    return; # Also will restart if succeeds
+	}
+    }
+    if($self->{ssl} && $self->{sasl} && $self->{in_stream}) {
+	# We're fully loaded, kick on
+	$self->{queue}->on_connection_connected($self);
+	return;
     }
     my ($bidi) = grep{$_->element eq '{urn:xmpp:features:bidi}bidi'}$_[0]->children_elements;
     if($bidi && $self->{queue}) {
@@ -246,6 +274,20 @@ sub on_stanza_received {
 	    my $tls = DJabberd::Stanza::StartTLS->downbless($node, $self);
 	    $self->filter_incoming_server_builtin($tls);
 	    $self->on_connected;
+    } elsif($node->element eq '{urn:ietf:params:xml:ns:xmpp-sasl}success' || $node->element eq '{urn:ietf:params:xml:ns:xmpp-sasl}failure') {
+	# SASL Handler
+	if($node->element_name eq 'success') {
+	    $self->log->debug($self->{id}." authenticated. No need for dialback.");
+	    $self->restart_stream();
+	    $self->on_connected();
+	    # Nothing to wait for actually but need to follow the script
+	} else {
+	    $self->{sasl} = undef;
+	    $self->log->info("SASL Autnetication failed: ".$node->innards_as_xml);
+	    #$self->close();
+	    # Fallback to classic dialback
+	    DJabberd::Connection::ServerOut::on_stream_start($self,$self->{in_stream}) if(ref($self->{in_stream}));
+	}
     } elsif(ref($self->{queue}) && ($self->{bidi} == BIDI_DISABLE or $node->element eq "{jabber:server:dialback}result")) {
 	# If queue is set we're either bidi or out (client). For bidi we need only db:result, otherwise we're pure out
 	if($node->element eq "{jabber:server:dialback}result" && $node->attr('{}type') eq 'valid' && $self->{bidi} != BIDI_DISABLE) {
@@ -280,7 +322,7 @@ sub close {
 
 # Imitate multi-inheritence - add missing calls from ServerOut
 *start_connecting = \&DJabberd::Connection::ServerOut::start_connecting;
-*on_connected = \&DJabberd::Connection::ServerOut::on_connected;
+#*on_connected = \&DJabberd::Connection::ServerOut::on_connected;
 *event_write = \&DJabberd::Connection::ServerOut::event_write;
 *event_hup = \&DJabberd::Connection::ServerOut::event_hup;
 
