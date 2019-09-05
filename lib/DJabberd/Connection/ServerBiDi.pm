@@ -100,8 +100,9 @@ Override ServerOut::on_connected - we need to provide at least 'from' attribute
 =cut
 sub on_connected {
     my $self = shift;
+    $self->set_to_host($self->{queue}->{domain});
     $self->start_init_stream(extra_attr => "xmlns:db='jabber:server:dialback' from='".$self->{vhost}->server_name."'",
-                             to         => $self->{queue}->{domain});
+                             to         => $self->to_host);
     $self->watch_read(1);
 }
 
@@ -112,6 +113,9 @@ This ServerIn overriden method will add <bidi/> stream feature to the back strea
 
 sub start_stream_back {
     my $self = shift;
+    # Don't add feature if BiDi is already established
+    return $self->SUPER::start_stream_back(@_) if($self->{bidi} == BIDI_SERVER || $self->{bidi} == BIDI_CLIENT);
+    # Otherwise reset the state and add feature to the stream start
     $self->{bidi} = BIDI_UNKNOWN;
     $self->SUPER::start_stream_back(@_, features => "<bidi xmlns='urn:xmpp:features:bidi'/>");
 }
@@ -191,7 +195,7 @@ sub on_stream_start {
     my ($ss) = @_;
     # Client will enable that explicitly when sending bidi,
     # server resets to unknown when sending features
-    $self->{bidi} = BIDI_DISABLE;
+    $self->{bidi} = BIDI_DISABLE if($self->{bidi} != BIDI_SERVER && $self->{bidi} != BIDI_CLIENT);;
     if(ref($self->{queue})) { # Out
 	if($ss->version->supports_features) {
     	    # Delay the dialback until features are seen
@@ -229,6 +233,12 @@ sub set_rcvd_features {
 	$self->write(\$xml);
 	return; # We'll end up with new stream or closed connection anyway
     }
+    my ($bidi) = grep{$_->element eq '{urn:xmpp:features:bidi}bidi'}$_[0]->children_elements;
+    if($bidi && $self->{queue} && $self->{bidi} < BIDI_CLIENT) {
+	$self->log->debug("Peer supports BIDI on conn ".$self->{id}.", enabling");
+	$self->write(qq{<bidi xmlns='urn:xmpp:bidi'/>});
+	$self->{bidi} = BIDI_CLIENT;
+    }
     my ($sasl) = grep{$_->element eq '{urn:ietf:params:xml:ns:xmpp-sasl}mechanisms'}$_[0]->children_elements;
     if($sasl && $sasl->first_element && $sasl->first_element->element_name eq 'mechanism' && $sasl->first_element->first_child eq 'EXTERNAL' && $self->{ssl}) {
 	# SASL External over TLS should be preferred to Dialback.
@@ -242,15 +252,9 @@ sub set_rcvd_features {
 	}
     }
     if($self->{ssl} && $self->{sasl} && $self->{in_stream}) {
-	# We're fully loaded, kick on
+	# We're fully loaded for s2s-out, kick on
 	$self->{queue}->on_connection_connected($self);
 	return;
-    }
-    my ($bidi) = grep{$_->element eq '{urn:xmpp:features:bidi}bidi'}$_[0]->children_elements;
-    if($bidi && $self->{queue}) {
-	$self->log->debug("Peer supports BIDI on conn ".$self->{id}.", enabling");
-	$self->write(qq{<bidi xmlns='urn:xmpp:bidi'/>});
-	$self->{bidi} = BIDI_CLIENT;
     }
     DJabberd::Connection::ServerOut::on_stream_start($self,$self->{in_stream}) if(ref($self->{in_stream}));
 }
@@ -278,6 +282,7 @@ sub on_stanza_received {
 	# SASL Handler
 	if($node->element_name eq 'success') {
 	    $self->log->debug($self->{id}." authenticated. No need for dialback.");
+	    $self->peer_domain_set_verified($self->to_host) if($self->{bidi} == BIDI_CLIENT);
 	    $self->restart_stream();
 	    $self->on_connected();
 	    # Nothing to wait for actually but need to follow the script
